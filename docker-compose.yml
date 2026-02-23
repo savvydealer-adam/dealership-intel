@@ -1,0 +1,38 @@
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - DATABASE_URL=postgresql://dealership_intel:dealership_intel@db:5432/dealership_intel
+      - APOLLO_API_KEY=${APOLLO_API_KEY}
+      - GOOGLE_SHEETS_JSON=${GOOGLE_SHEETS_JSON}
+      - CRM_API_URL=${CRM_API_URL:-http://host.docker.internal:3000/api}
+      - CRM_API_KEY=${CRM_API_KEY}
+      - CHROMIUM_PATH=/usr/bin/chromium
+      - BROWSER_HEADLESS=true
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dealership_intel
+      POSTGRES_USER: dealership_intel
+      POSTGRES_PASSWORD: dealership_intel
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dealership_intel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

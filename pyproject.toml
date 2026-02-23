@@ -1,0 +1,65 @@
+[project]
+name = "dealership-intel"
+version = "1.0.0"
+description = "Dealership intelligence gathering tool with headless browser crawling and Apollo.io integration"
+requires-python = ">=3.11"
+dependencies = [
+    # Web framework
+    "streamlit>=1.49.1",
+
+    # Data processing
+    "pandas>=2.3.2",
+
+    # HTTP & API
+    "requests>=2.32.5",
+
+    # Google Sheets
+    "gspread>=6.2.1",
+    "google-auth>=2.40.3",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.2",
+
+    # Database
+    "psycopg2-binary>=2.9.10",
+
+    # Web scraping (legacy)
+    "trafilatura>=2.0.0",
+
+    # Headless browser
+    "pyppeteer>=2.0.0",
+
+    # HTML parsing
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+
+    # Email verification
+    "dnspython>=2.8.0",
+    "aiosmtplib>=4.0.2",
+    "email-validator>=2.3.0",
+
+    # Configuration
+    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

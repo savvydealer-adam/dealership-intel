@@ -1,0 +1,43 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/dealership-intel:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/dealership-intel:latest'
+      - '.'
+
+  # Push to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/dealership-intel:$COMMIT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/dealership-intel:latest']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'dealership-intel'
+      - '--image=gcr.io/$PROJECT_ID/dealership-intel:$COMMIT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--port=5000'
+      - '--memory=2Gi'
+      - '--cpu=2'
+      - '--timeout=300'
+      - '--min-instances=0'
+      - '--max-instances=3'
+      - '--set-secrets=APOLLO_API_KEY=APOLLO_API_KEY:latest,DATABASE_URL=DATABASE_URL:latest,GOOGLE_SHEETS_JSON=GOOGLE_SHEETS_JSON:latest'
+      - '--allow-unauthenticated'
+
+images:
+  - 'gcr.io/$PROJECT_ID/dealership-intel:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/dealership-intel:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,371 @@
+"""Generic contact extraction from HTML: emails, phones, names."""
+
+import logging
+import re
+from typing import Any
+
+from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
+
+# Email patterns
+EMAIL_REGEX = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+    re.IGNORECASE,
+)
+
+# Obfuscated email patterns (e.g., "name [at] domain [dot] com")
+OBFUSCATED_EMAIL_REGEX = re.compile(
+    r"([a-zA-Z0-9._%+\-]+)\s*[\[\(]?\s*(?:at|AT)\s*[\]\)]?\s*"
+    r"([a-zA-Z0-9.\-]+)\s*[\[\(]?\s*(?:dot|DOT)\s*[\]\)]?\s*"
+    r"([a-zA-Z]{2,})",
+    re.IGNORECASE,
+)
+
+# US phone patterns
+PHONE_REGEX = re.compile(
+    r"""
+    (?:                        # Optional prefix
+        \+?1[\s.-]?            # Country code
+    )?
+    (?:                        # Area code
+        \(?\d{3}\)?[\s.-]?     # (xxx) or xxx
+    )
+    \d{3}[\s.-]?\d{4}         # xxx-xxxx
+    """,
+    re.VERBOSE,
+)
+
+# Excluded email patterns
+EXCLUDED_EMAILS = {
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "webmaster",
+    "postmaster",
+    "admin",
+    "info",
+    "support",
+    "contact",
+    "sales",
+    "service",
+    "help",
+    "feedback",
+    "marketing",
+    "press",
+    "media",
+    "hr",
+}
+
+# Excluded email domains (not personal/dealership)
+EXCLUDED_DOMAINS = {
+    "example.com",
+    "test.com",
+    "sentry.io",
+    "google.com",
+    "facebook.com",
+    "twitter.com",
+    "instagram.com",
+    "googleapis.com",
+    "gstatic.com",
+    "cloudflare.com",
+}
+
+
+def extract_contacts_from_html(html: str, base_domain: str = "") -> list[dict[str, Any]]:
+    """Extract structured contacts from an HTML page.
+
+    Looks for contact cards with name + title + email/phone groupings.
+    Falls back to flat extraction if no structured cards found.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    contacts = _extract_structured_contacts(soup, base_domain)
+
+    if not contacts:
+        contacts = _extract_flat_contacts(soup, html, base_domain)
+
+    return _deduplicate_contacts(contacts)
+
+
+def _extract_structured_contacts(soup: BeautifulSoup, base_domain: str) -> list[dict[str, Any]]:
+    """Extract contacts from structured card-like HTML elements."""
+    contacts: list[dict[str, Any]] = []
+
+    # Common staff card CSS class/id patterns
+    card_selectors = [
+        "[class*='staff']",
+        "[class*='team-member']",
+        "[class*='employee']",
+        "[class*='person']",
+        "[class*='bio']",
+        "[class*='profile']",
+        "[class*='card'][class*='contact']",
+        "[itemtype='http://schema.org/Person']",
+        "[itemtype='https://schema.org/Person']",
+        ".vcard",
+    ]
+
+    cards = []
+    for selector in card_selectors:
+        found = soup.select(selector)
+        if found:
+            cards = found
+            break
+
+    if not cards:
+        return []
+
+    for card in cards:
+        contact = _parse_contact_card(card, base_domain)
+        if contact and (contact.get("name") or contact.get("email")):
+            contacts.append(contact)
+
+    return contacts
+
+
+def _parse_contact_card(element, base_domain: str) -> dict[str, Any]:
+    """Parse a single contact card element."""
+    contact: dict[str, Any] = {"source": "crawl"}
+
+    # Extract name from headings
+    for tag in ["h2", "h3", "h4", "h5", "strong", ".name", "[class*='name']", "[itemprop='name']"]:
+        name_el = element.select_one(tag)
+        if name_el:
+            name = name_el.get_text(strip=True)
+            if name and len(name) > 2 and len(name) < 80 and not _is_generic_text(name):
+                contact["name"] = name
+                break
+
+    # Extract title/role
+    title_selectors = [
+        "[class*='title']",
+        "[class*='position']",
+        "[class*='role']",
+        "[class*='job']",
+        "[itemprop='jobTitle']",
+        ".title",
+        "p",
+        "span",
+    ]
+    for sel in title_selectors:
+        title_el = element.select_one(sel)
+        if title_el and title_el != element.select_one("h2, h3, h4, h5"):
+            title = title_el.get_text(strip=True)
+            if title and len(title) > 3 and len(title) < 100 and _looks_like_title(title):
+                contact["title"] = title
+                break
+
+    # Extract email
+    card_text = element.get_text()
+    emails = extract_emails(card_text, base_domain)
+    # Also check mailto links
+    for a_tag in element.find_all("a", href=True):
+        href = a_tag["href"]
+        if href.startswith("mailto:"):
+            email = href.replace("mailto:", "").split("?")[0].strip()
+            if _is_valid_contact_email(email, base_domain):
+                emails.insert(0, email)
+
+    if emails:
+        contact["email"] = emails[0]
+
+    # Extract phone
+    phones = extract_phones(card_text)
+    for a_tag in element.find_all("a", href=True):
+        href = a_tag["href"]
+        if href.startswith("tel:"):
+            phone = href.replace("tel:", "").strip()
+            phones.insert(0, phone)
+
+    if phones:
+        contact["phone"] = phones[0]
+
+    # Extract photo URL
+    img = element.select_one("img")
+    if img and img.get("src"):
+        contact["photo_url"] = img["src"]
+
+    return contact
+
+
+def _extract_flat_contacts(soup: BeautifulSoup, html: str, base_domain: str) -> list[dict[str, Any]]:
+    """Fallback: extract contacts as flat lists of emails/phones/names."""
+    contacts: list[dict[str, Any]] = []
+
+    emails = extract_emails(html, base_domain)
+
+    # Try to find names near emails
+    for email in emails[:10]:
+        contact: dict[str, Any] = {"email": email, "source": "crawl"}
+
+        # Look for name near the email in the HTML
+        name = _find_name_near_email(soup, email)
+        if name:
+            contact["name"] = name
+
+        # Look for title near the email
+        title = _find_title_near_email(soup, email)
+        if title:
+            contact["title"] = title
+
+        contacts.append(contact)
+
+    return contacts
+
+
+def extract_emails(text: str, base_domain: str = "") -> list[str]:
+    """Extract valid email addresses from text."""
+    emails: list[str] = []
+    seen: set[str] = set()
+
+    # Standard emails
+    for match in EMAIL_REGEX.finditer(text):
+        email = match.group().lower().strip()
+        if email not in seen and _is_valid_contact_email(email, base_domain):
+            seen.add(email)
+            emails.append(email)
+
+    # Obfuscated emails
+    for match in OBFUSCATED_EMAIL_REGEX.finditer(text):
+        email = f"{match.group(1)}@{match.group(2)}.{match.group(3)}".lower()
+        if email not in seen and _is_valid_contact_email(email, base_domain):
+            seen.add(email)
+            emails.append(email)
+
+    return emails
+
+
+def extract_phones(text: str) -> list[str]:
+    """Extract US phone numbers from text."""
+    phones: list[str] = []
+    seen: set[str] = set()
+
+    for match in PHONE_REGEX.finditer(text):
+        phone = match.group().strip()
+        digits = re.sub(r"\D", "", phone)
+
+        if len(digits) < 10 or len(digits) > 11:
+            continue
+        if digits in seen:
+            continue
+
+        seen.add(digits)
+        phones.append(phone)
+
+    return phones
+
+
+def _is_valid_contact_email(email: str, base_domain: str = "") -> bool:
+    """Check if an email looks like a real person's contact."""
+    local_part = email.split("@")[0].lower()
+    domain = email.split("@")[1].lower() if "@" in email else ""
+
+    # Exclude generic addresses
+    if local_part in EXCLUDED_EMAILS:
+        return False
+
+    # Exclude non-business domains
+    if domain in EXCLUDED_DOMAINS:
+        return False
+
+    # Prefer emails matching the dealership domain
+    if base_domain and domain != base_domain.lower():
+        # Still allow if it's a subdomain
+        if not domain.endswith(f".{base_domain.lower()}"):
+            return False
+
+    return True
+
+
+def _is_generic_text(text: str) -> bool:
+    """Check if text is too generic to be a name."""
+    generic = {
+        "learn more",
+        "read more",
+        "view profile",
+        "contact us",
+        "our team",
+        "meet our team",
+        "click here",
+        "more info",
+    }
+    return text.lower().strip() in generic
+
+
+def _looks_like_title(text: str) -> bool:
+    """Heuristic: does this text look like a job title?"""
+    title_keywords = {
+        "manager",
+        "director",
+        "president",
+        "owner",
+        "partner",
+        "specialist",
+        "advisor",
+        "consultant",
+        "assistant",
+        "sales",
+        "service",
+        "finance",
+        "parts",
+        "general",
+        "vp",
+        "vice",
+        "chief",
+        "officer",
+        "head",
+    }
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in title_keywords)
+
+
+def _find_name_near_email(soup: BeautifulSoup, email: str) -> str:
+    """Try to find a person's name near an email in the document."""
+    # Find elements containing the email
+    for el in soup.find_all(string=re.compile(re.escape(email))):
+        parent = el.parent
+        if parent:
+            # Look at siblings and parent for name-like headings
+            for sibling in parent.parent.children if parent.parent else []:
+                if hasattr(sibling, "name") and sibling.name in ("h2", "h3", "h4", "h5", "strong"):
+                    name = sibling.get_text(strip=True)
+                    if name and len(name) > 2 and len(name) < 80:
+                        return name
+    return ""
+
+
+def _find_title_near_email(soup: BeautifulSoup, email: str) -> str:
+    """Try to find a job title near an email in the document."""
+    for el in soup.find_all(string=re.compile(re.escape(email))):
+        parent = el.parent
+        if parent and parent.parent:
+            for sibling in parent.parent.children:
+                if hasattr(sibling, "get_text"):
+                    text = sibling.get_text(strip=True)
+                    if text and _looks_like_title(text) and text.lower() != email:
+                        return text
+    return ""
+
+
+def _deduplicate_contacts(contacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate contacts by email, then by name."""
+    seen_emails: set[str] = set()
+    seen_names: set[str] = set()
+    unique: list[dict[str, Any]] = []
+
+    for contact in contacts:
+        email = (contact.get("email") or "").lower().strip()
+        name = (contact.get("name") or "").lower().strip()
+
+        if email:
+            if email in seen_emails:
+                continue
+            seen_emails.add(email)
+        elif name:
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+
+        unique.append(contact)
+
+    return unique
