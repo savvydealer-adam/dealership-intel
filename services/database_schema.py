@@ -367,6 +367,12 @@ class DatabaseSchema:
                         if not self._migrate_intel_tables(cur):
                             return False
 
+                    # Check if autotrader columns need to be added
+                    if self._needs_autotrader_migration(cur):
+                        logger.info("Applying autotrader columns migration")
+                        if not self._migrate_autotrader_columns(cur):
+                            return False
+
                     conn.commit()
                     logger.info("Database migrations applied successfully")
                     return True
@@ -512,6 +518,39 @@ class DatabaseSchema:
 
         except Exception as e:
             logger.error(f"Failed to migrate intel tables: {e}")
+            return False
+
+    def _needs_autotrader_migration(self, cursor) -> bool:
+        """Check if companies table needs autotrader_dealer_id column."""
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'companies'
+            AND column_name = 'autotrader_dealer_id'
+            """
+        )
+        return cursor.fetchone() is None
+
+    def _migrate_autotrader_columns(self, cursor) -> bool:
+        """Add autotrader_dealer_id column and index to companies table."""
+        try:
+            cursor.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS autotrader_dealer_id VARCHAR(20);")
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_autotrader_dealer_id"
+                " ON companies(autotrader_dealer_id)"
+                " WHERE autotrader_dealer_id IS NOT NULL;"
+            )
+            # Ensure dealership_intel has a unique constraint on company_id
+            # for upsert support (ON CONFLICT)
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_dealership_intel_company_id_unique"
+                " ON dealership_intel(company_id);"
+            )
+            logger.info("Autotrader columns migration completed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to migrate autotrader columns: {e}")
             return False
 
     def reset_database(self) -> bool:

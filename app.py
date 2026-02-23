@@ -37,7 +37,7 @@ def main():
 
     # Landing page
     st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         st.markdown("### Process")
@@ -62,6 +62,12 @@ def main():
         st.markdown("Configure API keys, database connection, and crawling options.")
         if st.button("Go to Settings", use_container_width=True):
             st.switch_page("pages/4_Settings.py")
+
+    with col5:
+        st.markdown("### Autotrader")
+        st.markdown("Bulk import 21K+ dealers from Autotrader's sitemap.")
+        if st.button("Go to Autotrader", use_container_width=True):
+            st.switch_page("pages/5_Autotrader.py")
 
 
 def _init_session_state():

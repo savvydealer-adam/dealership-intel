@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     crm_api_url: str = Field(default="http://localhost:3000/api", alias="CRM_API_URL")
     crm_api_key: Optional[str] = Field(default=None, alias="CRM_API_KEY")
 
+    # Autotrader scraper
+    autotrader_concurrency: int = Field(default=10, alias="AUTOTRADER_CONCURRENCY")
+    autotrader_delay_min: float = Field(default=0.5, alias="AUTOTRADER_DELAY_MIN")
+    autotrader_delay_max: float = Field(default=1.5, alias="AUTOTRADER_DELAY_MAX")
+    autotrader_sitemap_url: str = Field(
+        default="https://www.autotrader.com/sitemap_dlr.xml.gz",
+        alias="AUTOTRADER_SITEMAP_URL",
+    )
+
     # Browser / Crawling
     chromium_path: Optional[str] = Field(default=None, alias="CHROMIUM_PATH")
     browser_headless: bool = Field(default=True, alias="BROWSER_HEADLESS")

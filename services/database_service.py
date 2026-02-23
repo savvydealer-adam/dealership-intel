@@ -1,5 +1,6 @@
 """Database service for managing all CRUD operations for dealership intel."""
 
+import json
 import logging
 import os
 from contextlib import contextmanager
@@ -752,6 +753,111 @@ class DatabaseService:
                 cur.execute(query, (limit,))
                 results = cur.fetchall()
                 return [dict(row) for row in results]
+
+    def get_scraped_autotrader_ids(self) -> set[str]:
+        """Get all existing autotrader dealer IDs for resumability.
+
+        Returns:
+            Set of autotrader_dealer_id strings already in the database.
+        """
+        query = """
+        SELECT autotrader_dealer_id
+        FROM companies
+        WHERE autotrader_dealer_id IS NOT NULL
+        """
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                return {row[0] for row in cur.fetchall()}
+
+    def save_autotrader_dealer(
+        self,
+        company_data: dict[str, Any],
+        intel_data: dict[str, Any],
+        autotrader_dealer_id: str,
+    ) -> Optional[int]:
+        """Upsert a dealer from Autotrader scraper.
+
+        Uses ON CONFLICT on autotrader_dealer_id for idempotent upserts.
+
+        Args:
+            company_data: Dict with domain, company_name, company_phone, company_address, etc.
+            intel_data: Dict with review_scores, new_inventory_count, used_inventory_count, etc.
+            autotrader_dealer_id: The Autotrader dealer ID string.
+
+        Returns:
+            company_id if saved, None on failure.
+        """
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Upsert company
+                    cur.execute(
+                        """
+                        INSERT INTO companies (
+                            domain, original_website, company_name, company_phone,
+                            company_address, industry, status, autotrader_dealer_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (autotrader_dealer_id)
+                            WHERE autotrader_dealer_id IS NOT NULL
+                        DO UPDATE SET
+                            company_name = COALESCE(EXCLUDED.company_name, companies.company_name),
+                            company_phone = COALESCE(EXCLUDED.company_phone, companies.company_phone),
+                            company_address = COALESCE(EXCLUDED.company_address, companies.company_address),
+                            original_website = COALESCE(EXCLUDED.original_website, companies.original_website),
+                            status = EXCLUDED.status
+                        RETURNING id
+                        """,
+                        (
+                            company_data.get("domain"),
+                            company_data.get("original_website"),
+                            company_data.get("company_name"),
+                            company_data.get("company_phone"),
+                            company_data.get("company_address"),
+                            company_data.get("industry", "Automotive"),
+                            company_data.get("status", "success"),
+                            autotrader_dealer_id,
+                        ),
+                    )
+                    company_id = cur.fetchone()[0]
+
+                    # Upsert dealership_intel (unique index on company_id)
+                    cur.execute(
+                        """
+                        INSERT INTO dealership_intel (
+                            company_id, new_inventory_count, used_inventory_count,
+                            review_scores, last_crawled_at
+                        ) VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (company_id) DO UPDATE SET
+                                new_inventory_count = COALESCE(
+                                    EXCLUDED.new_inventory_count,
+                                    dealership_intel.new_inventory_count
+                                ),
+                                used_inventory_count = COALESCE(
+                                    EXCLUDED.used_inventory_count,
+                                    dealership_intel.used_inventory_count
+                                ),
+                                review_scores = COALESCE(
+                                    EXCLUDED.review_scores,
+                                    dealership_intel.review_scores
+                                ),
+                                last_crawled_at = CURRENT_TIMESTAMP
+                        """,
+                        (
+                            company_id,
+                            intel_data.get("new_inventory_count"),
+                            intel_data.get("used_inventory_count"),
+                            json.dumps(intel_data.get("review_scores")) if intel_data.get("review_scores") else None,
+                        ),
+                    )
+
+                    conn.commit()
+                    return company_id
+
+        except Exception as e:
+            logger.error(f"Failed to save autotrader dealer {autotrader_dealer_id}: {e}")
+            return None
 
     def close(self) -> None:
         """Close database connection pool."""
