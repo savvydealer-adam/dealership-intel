@@ -1,4 +1,4 @@
-"""Pyppeteer browser manager: launch, stealth, page pool."""
+"""Pyppeteer browser manager with optional nodriver fallback for Cloudflare sites."""
 
 import asyncio
 import logging
@@ -109,8 +109,70 @@ class PageContext:
         self.manager._semaphore.release()
 
 
+class NodriverManager:
+    """Alternative browser using nodriver for Cloudflare-protected sites.
+
+    nodriver (undetected-chromedriver successor) is better at bypassing
+    Cloudflare challenges than Pyppeteer. Used as a fallback when
+    Pyppeteer gets blocked.
+    """
+
+    def __init__(self, headless: bool = True):
+        self.headless = headless
+        self._browser = None
+
+    async def get_page_content(self, url: str, timeout: int = 30) -> Optional[str]:
+        """Navigate to URL using nodriver and return page HTML.
+
+        Returns None if nodriver is not installed or navigation fails.
+        """
+        try:
+            import nodriver as uc
+        except ImportError:
+            logger.warning("nodriver not installed - pip install nodriver")
+            return None
+
+        browser = None
+        try:
+            browser = await uc.start(headless=self.headless)
+            page = await browser.get(url, new_tab=True)
+
+            # Wait for page to stabilize (Cloudflare challenge resolution)
+            await asyncio.sleep(5)
+
+            # Check if we passed the challenge
+            html = await page.get_content()
+            if html and "Just a moment" not in html:
+                return html
+
+            # Wait longer for challenge to resolve
+            await asyncio.sleep(10)
+            html = await page.get_content()
+            return html
+
+        except Exception as e:
+            logger.warning(f"nodriver fetch failed for {url}: {e}")
+            return None
+        finally:
+            if browser:
+                try:
+                    browser.stop()
+                except Exception:
+                    pass
+
+    async def close(self):
+        """Clean up."""
+        if self._browser:
+            try:
+                self._browser.stop()
+            except Exception:
+                pass
+            self._browser = None
+
+
 # Module-level convenience
 _manager: Optional[BrowserManager] = None
+_nodriver_manager: Optional[NodriverManager] = None
 
 
 def get_browser_manager() -> BrowserManager:
@@ -124,3 +186,12 @@ def get_browser_manager() -> BrowserManager:
             chromium_path=settings.chromium_path,
         )
     return _manager
+
+
+def get_nodriver_manager() -> NodriverManager:
+    """Get or create the singleton nodriver manager."""
+    global _nodriver_manager
+    if _nodriver_manager is None:
+        settings = get_settings()
+        _nodriver_manager = NodriverManager(headless=settings.browser_headless)
+    return _nodriver_manager

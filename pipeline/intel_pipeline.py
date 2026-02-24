@@ -1,5 +1,6 @@
 """Main orchestrator: processes dealerships through crawl -> validate -> store pipeline."""
 
+import asyncio
 import logging
 import time
 from typing import Any, Callable, Optional
@@ -14,7 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 class IntelPipeline:
-    """Orchestrates dealership intelligence gathering."""
+    """Orchestrates dealership intelligence gathering.
+
+    Supports two modes:
+    - Apollo-only (original): company search + people search via Apollo
+    - Crawl-first (new): detect platform -> crawl staff -> crawl inventory -> Apollo fallback
+    """
 
     def __init__(
         self,
@@ -22,11 +28,22 @@ class IntelPipeline:
         db_service: Optional[DatabaseService] = None,
         validator: Optional[ContactValidator] = None,
         role_classifier: Optional[RoleClassifier] = None,
+        # Crawl-first dependencies (optional — pipeline works without them)
+        browser_manager=None,
+        staff_crawler=None,
+        inventory_crawler=None,
+        platform_detector=None,
+        use_crawling: bool = False,
     ):
         self.apollo = apollo_service
         self.db = db_service
         self.validator = validator or ContactValidator(enable_email_verification=False)
         self.role_classifier = role_classifier or RoleClassifier()
+        self.browser_manager = browser_manager
+        self.staff_crawler = staff_crawler
+        self.inventory_crawler = inventory_crawler
+        self.platform_detector = platform_detector
+        self.use_crawling = use_crawling
 
     def process_dealerships(
         self,
@@ -166,6 +183,219 @@ class IntelPipeline:
         # Extract company name
         company_name = extract_company_name(website_url, domain)
 
+        # If crawling is enabled, use crawl-first flow
+        if self.use_crawling and self.browser_manager:
+            return self._process_with_crawling(
+                website_url,
+                domain,
+                company_name,
+                analysis_run_id=analysis_run_id,
+                role_filter_criteria=role_filter_criteria,
+            )
+
+        # Otherwise, use Apollo-only flow (original behavior)
+        return self._process_with_apollo(
+            website_url,
+            domain,
+            company_name,
+            analysis_run_id=analysis_run_id,
+            role_filter_criteria=role_filter_criteria,
+        )
+
+    def _process_with_crawling(
+        self,
+        website_url: str,
+        domain: str,
+        company_name: str,
+        *,
+        analysis_run_id: Optional[int] = None,
+        role_filter_criteria: Optional[RoleFilterCriteria] = None,
+    ) -> dict[str, Any]:
+        """Crawl-first flow: detect platform -> crawl staff -> crawl inventory -> Apollo fallback."""
+        base_url = f"https://{domain}"
+        detected_platform = None
+        crawled_contacts: list[dict[str, Any]] = []
+        inventory_data: dict[str, Any] = {}
+
+        try:
+            crawl_results = self._run_crawl_async(
+                base_url, domain, role_filter_criteria
+            )
+            detected_platform = crawl_results.get("platform")
+            crawled_contacts = crawl_results.get("contacts", [])
+            inventory_data = crawl_results.get("inventory", {})
+        except Exception as e:
+            logger.warning(f"Crawl failed for {domain}: {e}")
+
+        # Build result from crawled + Apollo data
+        result: dict[str, Any] = {
+            "original_website": website_url,
+            "domain": domain,
+            "company_name": company_name or domain,
+            "platform": detected_platform or "Unknown",
+            "status": "Success" if crawled_contacts else "Partial",
+        }
+
+        # Add inventory data
+        if inventory_data:
+            result["new_inventory_count"] = inventory_data.get("new_count")
+            result["used_inventory_count"] = inventory_data.get("used_count")
+            result["new_inventory_url"] = inventory_data.get("new_url")
+            result["used_inventory_url"] = inventory_data.get("used_url")
+
+        # Apollo fallback for company data + additional contacts
+        apollo_contacts = []
+        company_data = None
+        if self.apollo:
+            company_data = self.apollo.search_company_multi_strategy(domain, company_name)
+            if company_data:
+                result["company_name"] = company_data.get("name", company_name)
+                result["company_id"] = company_data.get("id", "")
+                result["industry"] = company_data.get("industry", "")
+                result["company_size"] = company_data.get("estimated_num_employees", "")
+                result["company_phone"] = company_data.get("phone", "")
+                result["company_address"] = company_data.get("address", "")
+                result["linkedin_url"] = company_data.get("linkedin_url", "")
+
+            # Only fetch Apollo people if crawl didn't find enough
+            if len(crawled_contacts) < 2:
+                apollo_contacts = self.apollo.search_people(
+                    company_data.get("id", "") if company_data else "",
+                    domain,
+                    limit=10,
+                    role_filter_criteria=role_filter_criteria,
+                )
+                for c in apollo_contacts:
+                    c["source"] = "apollo"
+
+        # Merge contacts: crawled first, Apollo fill-in
+        all_contacts = self._merge_contacts(crawled_contacts, apollo_contacts)
+
+        if not all_contacts and not company_data:
+            result["status"] = "No Data Found"
+            result["error_message"] = "No contacts found via crawl or Apollo"
+            if self.db and analysis_run_id:
+                try:
+                    self.db.save_company(result, analysis_run_id)
+                except Exception:
+                    pass
+            return result
+
+        result["status"] = "Success"
+
+        # Apply role filtering
+        if all_contacts and role_filter_criteria:
+            for person in all_contacts:
+                person["company_name"] = result.get("company_name", "")
+            all_contacts = self.role_classifier.filter_contacts_by_role(all_contacts, role_filter_criteria)
+
+        # Validate and score
+        contacts = self._validate_contacts(all_contacts[:5], domain, result.get("company_name", ""))
+        contacts.sort(key=lambda c: c.get("confidence_score", 0), reverse=True)
+        result["contacts"] = contacts
+
+        # Flatten contacts into result for DataFrame compatibility
+        for i, contact in enumerate(contacts):
+            prefix = f"contact_{i + 1}"
+            result[f"{prefix}_name"] = contact.get("name", "")
+            result[f"{prefix}_title"] = contact.get("title", "")
+            result[f"{prefix}_email"] = contact.get("email", "")
+            result[f"{prefix}_phone"] = contact.get("phone", "")
+            result[f"{prefix}_linkedin"] = contact.get("linkedin_url", "")
+            result[f"{prefix}_confidence_score"] = contact.get("confidence_score", 0)
+            result[f"{prefix}_quality_flags"] = contact.get("quality_flags", "")
+
+        # Save to DB
+        company_id = None
+        if self.db and analysis_run_id:
+            try:
+                company_id = self.db.save_company(result, analysis_run_id)
+            except Exception as e:
+                logger.warning(f"Database save failed for {domain}: {e}")
+
+        if self.db and company_id and contacts:
+            try:
+                self.db.save_contacts(company_id, contacts)
+            except Exception as e:
+                logger.warning(f"Failed to save contacts for {domain}: {e}")
+
+        return result
+
+    def _run_crawl_async(
+        self,
+        base_url: str,
+        domain: str,
+        role_filter_criteria=None,
+    ) -> dict[str, Any]:
+        """Run the async crawl operations, handling event loop correctly."""
+
+        async def _crawl():
+            result: dict[str, Any] = {"platform": None, "contacts": [], "inventory": {}}
+
+            async with await self.browser_manager.get_page() as page:
+                # Step 1: Navigate to homepage and detect platform
+                try:
+                    response = await page.goto(
+                        base_url,
+                        {"timeout": 30000, "waitUntil": "domcontentloaded"},
+                    )
+                    if response and response.status < 400 and self.platform_detector:
+                        platform_result = await self.platform_detector.detect(page)
+                        result["platform"] = platform_result.get("platform")
+                        logger.info(
+                            f"Detected platform for {domain}: {result['platform']} "
+                            f"(confidence={platform_result.get('confidence', 0):.2f})"
+                        )
+                except Exception as e:
+                    logger.warning(f"Homepage load failed for {base_url}: {e}")
+
+                # Step 2: Crawl inventory (reuse the page)
+                if self.inventory_crawler:
+                    try:
+                        result["inventory"] = await self.inventory_crawler.crawl_inventory(
+                            page, base_url, platform=result["platform"]
+                        )
+                    except Exception as e:
+                        logger.warning(f"Inventory crawl failed for {domain}: {e}")
+
+            # Step 3: Crawl staff page (uses its own page from browser_manager)
+            if self.staff_crawler:
+                try:
+                    result["contacts"] = await self.staff_crawler.crawl_staff_page(
+                        base_url, platform=result["platform"]
+                    )
+                    for c in result["contacts"]:
+                        c["source"] = "crawl"
+                except Exception as e:
+                    logger.warning(f"Staff crawl failed for {domain}: {e}")
+
+            return result
+
+        # Handle running from sync context (Streamlit)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _crawl())
+                return future.result()
+        else:
+            return asyncio.run(_crawl())
+
+    def _process_with_apollo(
+        self,
+        website_url: str,
+        domain: str,
+        company_name: str,
+        *,
+        analysis_run_id: Optional[int] = None,
+        role_filter_criteria: Optional[RoleFilterCriteria] = None,
+    ) -> dict[str, Any]:
+        """Original Apollo-only flow."""
         # Try Apollo for company data
         company_data = None
         if self.apollo:
@@ -250,6 +480,35 @@ class IntelPipeline:
                 logger.warning(f"Failed to save contacts for {domain}: {e}")
 
         return result
+
+    def _merge_contacts(
+        self,
+        crawled: list[dict[str, Any]],
+        apollo: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Merge crawled and Apollo contacts, deduplicating by email."""
+        seen_emails: set[str] = set()
+        merged: list[dict[str, Any]] = []
+
+        for contact in crawled:
+            email = (contact.get("email") or "").lower().strip()
+            if email and email not in seen_emails:
+                seen_emails.add(email)
+                merged.append(contact)
+            elif not email:
+                merged.append(contact)
+
+        for contact in apollo:
+            email = (contact.get("email") or "").lower().strip()
+            if email and email not in seen_emails:
+                seen_emails.add(email)
+                merged.append(contact)
+            elif not email:
+                name = (contact.get("name") or "").lower().strip()
+                if name and not any((c.get("name") or "").lower().strip() == name for c in merged):
+                    merged.append(contact)
+
+        return merged
 
     def _validate_contacts(
         self,

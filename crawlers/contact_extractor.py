@@ -1,10 +1,12 @@
-"""Generic contact extraction from HTML: emails, phones, names."""
+"""Generic and provider-specific contact extraction from HTML."""
 
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
+
+from config.platforms import PlatformInfo
 
 logger = logging.getLogger(__name__)
 
@@ -72,19 +74,154 @@ EXCLUDED_DOMAINS = {
 }
 
 
-def extract_contacts_from_html(html: str, base_domain: str = "") -> list[dict[str, Any]]:
+def extract_contacts_from_html(
+    html: str, base_domain: str = "", platform_info: Optional[PlatformInfo] = None
+) -> list[dict[str, Any]]:
     """Extract structured contacts from an HTML page.
 
-    Looks for contact cards with name + title + email/phone groupings.
-    Falls back to flat extraction if no structured cards found.
+    When platform_info is provided, tries provider-specific selectors first
+    for much more reliable extraction.
     """
     soup = BeautifulSoup(html, "lxml")
+
+    # Try provider-specific extraction first
+    if platform_info and platform_info.card_selectors:
+        contacts = _extract_provider_contacts(soup, base_domain, platform_info)
+        if contacts:
+            return _deduplicate_contacts(contacts)
+
+    # Fall back to generic structured extraction
     contacts = _extract_structured_contacts(soup, base_domain)
 
     if not contacts:
         contacts = _extract_flat_contacts(soup, html, base_domain)
 
     return _deduplicate_contacts(contacts)
+
+
+def _extract_provider_contacts(
+    soup: BeautifulSoup, base_domain: str, platform_info: PlatformInfo
+) -> list[dict[str, Any]]:
+    """Extract contacts using provider-specific CSS selectors."""
+    contacts: list[dict[str, Any]] = []
+
+    # Find cards using provider-specific selectors
+    cards: list[Tag] = []
+    for selector in platform_info.card_selectors:
+        try:
+            found = soup.select(selector)
+            if found:
+                cards = found
+                logger.debug(f"Provider selector '{selector}' matched {len(found)} cards")
+                break
+        except Exception:
+            continue
+
+    if not cards:
+        return []
+
+    for card in cards:
+        contact = _parse_provider_card(card, base_domain, platform_info)
+        if contact and (contact.get("name") or contact.get("email")):
+            contacts.append(contact)
+
+    logger.info(f"Provider-specific extraction found {len(contacts)} contacts")
+    return contacts
+
+
+def _parse_provider_card(
+    element: Tag, base_domain: str, platform_info: PlatformInfo
+) -> dict[str, Any]:
+    """Parse a contact card using provider-specific selectors."""
+    contact: dict[str, Any] = {"source": "crawl"}
+
+    # Extract name using provider-specific selectors
+    for selector in platform_info.name_selectors:
+        try:
+            name_el = element.select_one(selector)
+            if name_el:
+                name = name_el.get_text(strip=True)
+                if name and 2 < len(name) < 80 and not _is_generic_text(name):
+                    contact["name"] = name
+                    break
+        except Exception:
+            continue
+
+    # Extract title using provider-specific selectors
+    for selector in platform_info.title_selectors:
+        try:
+            title_el = element.select_one(selector)
+            if title_el:
+                title = title_el.get_text(strip=True)
+                if title and 3 < len(title) < 100 and _looks_like_title(title):
+                    contact["title"] = title
+                    break
+        except Exception:
+            continue
+
+    # Extract email using provider-specific selectors, then fallback
+    for selector in platform_info.email_selectors:
+        try:
+            email_el = element.select_one(selector)
+            if email_el:
+                if selector.startswith("a[href"):
+                    href = email_el.get("href", "")
+                    if href.startswith("mailto:"):
+                        email = href.replace("mailto:", "").split("?")[0].strip()
+                        if _is_valid_contact_email(email, base_domain):
+                            contact["email"] = email
+                            break
+                else:
+                    text = email_el.get_text(strip=True)
+                    emails = extract_emails(text, base_domain)
+                    if emails:
+                        contact["email"] = emails[0]
+                        break
+        except Exception:
+            continue
+
+    # Fallback: scan card text for emails
+    if "email" not in contact:
+        for a_tag in element.find_all("a", href=True):
+            href = a_tag["href"]
+            if href.startswith("mailto:"):
+                email = href.replace("mailto:", "").split("?")[0].strip()
+                if _is_valid_contact_email(email, base_domain):
+                    contact["email"] = email
+                    break
+
+    # Extract phone using provider-specific selectors, then fallback
+    for selector in platform_info.phone_selectors:
+        try:
+            phone_el = element.select_one(selector)
+            if phone_el:
+                if selector.startswith("a[href"):
+                    href = phone_el.get("href", "")
+                    if href.startswith("tel:"):
+                        contact["phone"] = href.replace("tel:", "").strip()
+                        break
+                else:
+                    phones = extract_phones(phone_el.get_text())
+                    if phones:
+                        contact["phone"] = phones[0]
+                        break
+        except Exception:
+            continue
+
+    # Fallback: scan card for tel: links
+    if "phone" not in contact:
+        for a_tag in element.find_all("a", href=True):
+            href = a_tag["href"]
+            if href.startswith("tel:"):
+                contact["phone"] = href.replace("tel:", "").strip()
+                break
+
+    # Extract photo URL
+    img = element.select_one("img")
+    if img and img.get("src"):
+        contact["photo_url"] = img["src"]
+
+    return contact
 
 
 def _extract_structured_contacts(soup: BeautifulSoup, base_domain: str) -> list[dict[str, Any]]:

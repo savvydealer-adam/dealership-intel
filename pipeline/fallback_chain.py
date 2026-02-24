@@ -1,5 +1,6 @@
 """Data source fallback chain: crawl first -> Apollo fallback -> merge & validate."""
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -10,7 +11,7 @@ class FallbackChain:
     """Manages the priority chain for contact discovery.
 
     Priority:
-    1. Crawl dealership website (staff pages) - Phase 2
+    1. Crawl dealership website (staff pages) - provider-aware
     2. If < 2 contacts found: query Apollo API
     3. Merge results, deduplicate by email
     4. Validate all contacts
@@ -21,30 +22,32 @@ class FallbackChain:
         self,
         apollo_service=None,
         staff_crawler=None,
+        browser_manager=None,
         min_crawled_contacts: int = 2,
     ):
         self.apollo = apollo_service
         self.staff_crawler = staff_crawler
+        self.browser_manager = browser_manager
         self.min_crawled_contacts = min_crawled_contacts
 
-    def find_contacts(
+    async def find_contacts_async(
         self,
         domain: str,
         company_name: Optional[str] = None,
         apollo_company_id: Optional[str] = None,
         role_filter_criteria=None,
+        platform: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Find contacts using the fallback chain.
-
-        Returns a merged, deduplicated list of contacts with source attribution.
-        """
+        """Find contacts using the fallback chain (async version)."""
         crawled_contacts: list[dict[str, Any]] = []
         apollo_contacts: list[dict[str, Any]] = []
 
-        # Step 1: Try crawling the website (Phase 2 - stub for now)
+        # Step 1: Try crawling the website with provider-aware extraction
         if self.staff_crawler:
             try:
-                crawled_contacts = self.staff_crawler.crawl_staff_page(f"https://{domain}")
+                crawled_contacts = await self.staff_crawler.crawl_staff_page(
+                    f"https://{domain}", platform=platform
+                )
                 logger.info(f"Crawled {len(crawled_contacts)} contacts from {domain}")
                 for contact in crawled_contacts:
                     contact["source"] = "crawl"
@@ -71,6 +74,41 @@ class FallbackChain:
         logger.info(f"Merged to {len(merged)} unique contacts for {domain}")
 
         return merged
+
+    def find_contacts(
+        self,
+        domain: str,
+        company_name: Optional[str] = None,
+        apollo_company_id: Optional[str] = None,
+        role_filter_criteria=None,
+        platform: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Find contacts using the fallback chain (sync wrapper).
+
+        Handles the case where we're already inside a running event loop
+        (e.g. from Streamlit).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        coro = self.find_contacts_async(
+            domain,
+            company_name=company_name,
+            apollo_company_id=apollo_company_id,
+            role_filter_criteria=role_filter_criteria,
+            platform=platform,
+        )
+
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
+        else:
+            return asyncio.run(coro)
 
     def _merge_contacts(
         self,

@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from config.platforms import PLATFORM_SIGNATURES
+from config.platforms import PLATFORM_SIGNATURES, PlatformInfo
 from crawlers.stealth import dismiss_cookie_consent, human_delay
 
 logger = logging.getLogger(__name__)
@@ -58,13 +58,15 @@ class InventoryCrawler:
             "used_url": None,
         }
 
+        platform_info = PLATFORM_SIGNATURES.get(platform) if platform else None
+
         # Get platform-specific paths
         new_paths, used_paths = self._get_inventory_paths(platform)
 
         # Count new inventory
         for path in new_paths:
             url = urljoin(base_url, path)
-            count = await self._count_vehicles(page, url)
+            count = await self._count_vehicles(page, url, platform_info)
             if count is not None:
                 result["new_count"] = count
                 result["new_url"] = url
@@ -75,7 +77,7 @@ class InventoryCrawler:
         # Count used inventory
         for path in used_paths:
             url = urljoin(base_url, path)
-            count = await self._count_vehicles(page, url)
+            count = await self._count_vehicles(page, url, platform_info)
             if count is not None:
                 result["used_count"] = count
                 result["used_url"] = url
@@ -84,7 +86,9 @@ class InventoryCrawler:
         logger.info(f"Inventory for {base_url}: new={result['new_count']}, used={result['used_count']}")
         return result
 
-    async def _count_vehicles(self, page, url: str) -> Optional[int]:
+    async def _count_vehicles(
+        self, page, url: str, platform_info: Optional[PlatformInfo] = None
+    ) -> Optional[int]:
         """Navigate to an inventory page and extract the vehicle count."""
         try:
             response = await page.goto(url, {"timeout": self.timeout * 1000, "waitUntil": "domcontentloaded"})
@@ -96,12 +100,22 @@ class InventoryCrawler:
 
             html = await page.content()
 
-            # Strategy 1: Look for result count text
+            # Strategy 1: Provider-specific count selectors
+            if platform_info:
+                count = self._extract_count_from_selectors(html, platform_info)
+                if count is not None:
+                    return count
+
+                count = self._extract_count_from_provider_patterns(html, platform_info)
+                if count is not None:
+                    return count
+
+            # Strategy 2: Generic text patterns
             count = self._extract_count_from_text(html)
             if count is not None:
                 return count
 
-            # Strategy 2: Count vehicle cards on page
+            # Strategy 3: Count vehicle cards on page
             count = self._count_vehicle_cards(html)
             if count and count > 0:
                 return count
@@ -111,6 +125,50 @@ class InventoryCrawler:
         except Exception as e:
             logger.debug(f"Inventory page failed for {url}: {e}")
             return None
+
+    def _extract_count_from_selectors(self, html: str, platform_info: PlatformInfo) -> Optional[int]:
+        """Extract vehicle count using provider-specific CSS selectors."""
+        if not platform_info.inventory_count_selectors:
+            return None
+
+        soup = BeautifulSoup(html, "lxml")
+        for selector in platform_info.inventory_count_selectors:
+            try:
+                elements = soup.select(selector)
+                for el in elements:
+                    # Check data attributes first
+                    for attr in ("data-total", "data-count", "data-value"):
+                        val = el.get(attr)
+                        if val and val.isdigit():
+                            count = int(val)
+                            if 1 <= count <= 10000:
+                                return count
+
+                    # Check text content
+                    text = el.get_text(strip=True)
+                    digits = re.sub(r"[^\d]", "", text)
+                    if digits:
+                        count = int(digits)
+                        if 1 <= count <= 10000:
+                            return count
+            except Exception:
+                continue
+
+        return None
+
+    def _extract_count_from_provider_patterns(self, html: str, platform_info: PlatformInfo) -> Optional[int]:
+        """Extract count using provider-specific regex patterns."""
+        if not platform_info.inventory_count_patterns:
+            return None
+
+        for pattern in platform_info.inventory_count_patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                count = int(match.group(1))
+                if 1 <= count <= 10000:
+                    return count
+
+        return None
 
     def _extract_count_from_text(self, html: str) -> Optional[int]:
         """Extract vehicle count from text like 'Showing 1-25 of 142 vehicles'."""

@@ -56,6 +56,11 @@ class PlatformDetector:
         if cms:
             return {"platform": cms, "confidence": 0.7, "method": "cms_pattern"}
 
+        # Check for WordPress theme patterns common in dealerships
+        wp_theme = self._check_wp_dealer_themes(html_lower, soup)
+        if wp_theme:
+            return {"platform": wp_theme, "confidence": 0.65, "method": "wp_theme"}
+
         return {"platform": "Custom/Unknown", "confidence": 0.0, "method": "none"}
 
     def _check_meta_generator(self, soup: BeautifulSoup) -> Optional[str]:
@@ -104,5 +109,23 @@ class PlatformDetector:
             for regex in regexes:
                 if re.search(regex, html_lower):
                     return cms_name
+
+        return None
+
+    def _check_wp_dealer_themes(self, html_lower: str, soup: BeautifulSoup) -> Optional[str]:
+        """Check for WordPress themes commonly used by dealerships."""
+        theme_patterns = {
+            "WordPress (Jesuspended Theme)": [r"theme-flavor", r"flavor-theme"],
+            "WordPress (AutoTrader Theme)": [r"theme-developer", r"developer-theme"],
+        }
+
+        # Look in link/script URLs for theme slugs
+        for el in soup.find_all(["link", "script"], {"href": True, "src": True}):
+            url = (el.get("href") or el.get("src") or "").lower()
+            if "wp-content/themes/" in url:
+                for theme_name, patterns in theme_patterns.items():
+                    for pattern in patterns:
+                        if re.search(pattern, url):
+                            return theme_name
 
         return None

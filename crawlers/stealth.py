@@ -1,7 +1,9 @@
-"""Anti-detection layer for Pyppeteer: JS injection, headers, fingerprinting."""
+"""Anti-detection layer for Pyppeteer: JS injection, headers, fingerprinting, Cloudflare handling."""
 
+import asyncio
 import logging
 import random
+from typing import Any, Optional
 
 from pyppeteer.page import Page
 
@@ -127,6 +129,23 @@ CAPTCHA_DETECT_JS = """() => {
     return indicators.some(el => el !== null);
 }"""
 
+# Cloudflare challenge detection
+CLOUDFLARE_DETECT_JS = """() => {
+    const indicators = [
+        // Challenge page patterns
+        document.title && document.title.includes('Just a moment'),
+        document.title && document.title.includes('Attention Required'),
+        document.querySelector('#cf-wrapper'),
+        document.querySelector('#challenge-form'),
+        document.querySelector('#challenge-running'),
+        document.querySelector('[class*="cf-browser-verification"]'),
+        // Turnstile widget
+        document.querySelector('[class*="cf-turnstile"]'),
+        document.querySelector('iframe[src*="challenges.cloudflare.com"]'),
+    ];
+    return indicators.some(el => el === true || el !== null);
+}"""
+
 
 async def apply_stealth(page: Page) -> None:
     """Apply all stealth measures to a page."""
@@ -185,9 +204,79 @@ async def detect_captcha(page: Page) -> bool:
         return False
 
 
+async def detect_cloudflare(page: Page, response=None) -> bool:
+    """Detect Cloudflare protection on a page.
+
+    Checks both HTTP response headers and page content for CF indicators.
+    """
+    # Check response headers for Cloudflare indicators
+    if response:
+        try:
+            headers = response.headers or {}
+            header_lower = {k.lower(): v for k, v in headers.items()}
+            cf_headers = ["cf-ray", "cf-cache-status", "cf-mitigated"]
+            has_cf_headers = any(h in header_lower for h in cf_headers)
+
+            # 403 + Cloudflare headers = likely blocked
+            if response.status == 403 and has_cf_headers:
+                logger.warning("Cloudflare 403 block detected via headers")
+                return True
+
+            # Challenge page (503 from CF)
+            if response.status == 503 and has_cf_headers:
+                logger.warning("Cloudflare 503 challenge detected")
+                return True
+        except Exception:
+            pass
+
+    # Check page content for challenge patterns
+    try:
+        is_cf = await page.evaluate(CLOUDFLARE_DETECT_JS)
+        if is_cf:
+            logger.warning("Cloudflare challenge page detected via DOM")
+        return is_cf
+    except Exception:
+        return False
+
+
 async def human_delay(min_seconds: float = 1.5, max_seconds: float = 3.0) -> None:
     """Add a human-like random delay."""
-    import asyncio
-
     delay = random.uniform(min_seconds, max_seconds)
     await asyncio.sleep(delay)
+
+
+async def retry_with_backoff(
+    coro_factory,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+    max_delay: float = 30.0,
+    jitter: bool = True,
+) -> Optional[Any]:
+    """Retry an async operation with exponential backoff.
+
+    Args:
+        coro_factory: Callable that returns a new coroutine each call.
+        max_retries: Maximum number of retry attempts.
+        base_delay: Starting delay in seconds.
+        max_delay: Maximum delay in seconds.
+        jitter: Add random jitter to delays.
+
+    Returns:
+        The result of the coroutine, or None if all retries failed.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            if attempt == max_retries:
+                logger.warning(f"All {max_retries + 1} attempts failed: {e}")
+                return None
+
+            delay = min(base_delay * (2**attempt), max_delay)
+            if jitter:
+                delay = delay * (0.5 + random.random())
+
+            logger.info(f"Attempt {attempt + 1} failed ({e}), retrying in {delay:.1f}s...")
+            await asyncio.sleep(delay)
+
+    return None

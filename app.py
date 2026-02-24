@@ -37,7 +37,7 @@ def main():
 
     # Landing page
     st.markdown("---")
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         st.markdown("### Process")
@@ -46,24 +46,32 @@ def main():
             st.switch_page("pages/1_Process.py")
 
     with col2:
+        st.markdown("### Enrich")
+        st.markdown("Upload an xlsx dealer list and enrich with crawling + Apollo.")
+        if st.button("Go to Enrich", use_container_width=True):
+            st.switch_page("pages/6_Enrich.py")
+
+    with col3:
         st.markdown("### Results")
         st.markdown("View, filter, and export results from past processing runs.")
         if st.button("Go to Results", use_container_width=True):
             st.switch_page("pages/2_Results.py")
 
-    with col3:
+    col4, col5, col6 = st.columns(3)
+
+    with col4:
         st.markdown("### Search")
         st.markdown("Search the database of previously analyzed dealerships.")
         if st.button("Go to Search", use_container_width=True):
             st.switch_page("pages/3_Search.py")
 
-    with col4:
+    with col5:
         st.markdown("### Settings")
         st.markdown("Configure API keys, database connection, and crawling options.")
         if st.button("Go to Settings", use_container_width=True):
             st.switch_page("pages/4_Settings.py")
 
-    with col5:
+    with col6:
         st.markdown("### Autotrader")
         st.markdown("Bulk import 21K+ dealers from Autotrader's sitemap.")
         if st.button("Go to Autotrader", use_container_width=True):
