@@ -30,6 +30,7 @@ RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache
 # Copy application code
 COPY . .
 
-EXPOSE 5000
+EXPOSE 8080
 
-CMD ["streamlit", "run", "app.py", "--server.port=5000", "--server.address=0.0.0.0", "--server.headless=true"]
+# Run FastAPI API server (Streamlit UI available separately)
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
