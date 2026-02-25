@@ -40,7 +40,8 @@ class BrowserManager:
         self.max_pages = max_pages
         self.chromium_path = chromium_path or os.environ.get("CHROMIUM_PATH")
         self._browser: Optional[Browser] = None
-        self._semaphore = asyncio.Semaphore(max_pages)
+        self._max_pages = max_pages
+        self._semaphore: Optional[asyncio.Semaphore] = None
 
     async def launch(self) -> Browser:
         """Launch the browser if not already running."""
@@ -72,6 +73,17 @@ class BrowserManager:
 
         return page
 
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """Get or create semaphore bound to the current event loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if self._semaphore is None or (loop and hasattr(self._semaphore, '_loop') and self._semaphore._loop is not loop):
+            self._semaphore = asyncio.Semaphore(self._max_pages)
+        return self._semaphore
+
     async def get_page(self) -> "PageContext":
         """Get a page from the pool (context manager)."""
         return PageContext(self)
@@ -96,7 +108,7 @@ class PageContext:
         self.page: Optional[Page] = None
 
     async def __aenter__(self) -> Page:
-        await self.manager._semaphore.acquire()
+        await self.manager._get_semaphore().acquire()
         self.page = await self.manager.new_page()
         return self.page
 
@@ -106,7 +118,7 @@ class PageContext:
                 await self.page.close()
             except Exception:
                 pass
-        self.manager._semaphore.release()
+        self.manager._get_semaphore().release()
 
 
 class NodriverManager:
@@ -134,7 +146,11 @@ class NodriverManager:
 
         browser = None
         try:
-            browser = await uc.start(headless=self.headless)
+            browser_args = {"headless": self.headless, "sandbox": False}
+            chromium_path = os.environ.get("CHROMIUM_PATH")
+            if chromium_path:
+                browser_args["browser_executable_path"] = chromium_path
+            browser = await uc.start(**browser_args)
             page = await browser.get(url, new_tab=True)
 
             # Wait for page to stabilize (Cloudflare challenge resolution)
