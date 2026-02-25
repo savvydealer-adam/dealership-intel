@@ -32,7 +32,7 @@ steps:
       - '--timeout=300'
       - '--min-instances=0'
       - '--max-instances=3'
-      - '--set-env-vars=PYPPETEER_CHROMIUM_REVISION=0,CHROMIUM_PATH=/usr/bin/chromium'
+      - '--set-env-vars=PYPPETEER_CHROMIUM_REVISION=0,CHROMIUM_PATH=/usr/bin/google-chrome-stable'
       - '--allow-unauthenticated'
 
 images:
