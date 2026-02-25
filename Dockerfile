@@ -1,9 +1,9 @@
 FROM python:3.11-slim
 
-# Install Chromium and dependencies for Pyppeteer
+# Install Google Chrome (not Chromium - needed for nodriver Cloudflare bypass)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
-    chromium-driver \
+    wget \
+    gnupg \
     fonts-liberation \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -14,10 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcomposite1 \
     libxdamage1 \
     libxrandr2 \
+    && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chromium path for Pyppeteer
-ENV CHROMIUM_PATH=/usr/bin/chromium
+# Set Chrome path for nodriver and pyppeteer
+ENV CHROMIUM_PATH=/usr/bin/google-chrome-stable
 ENV PYPPETEER_CHROMIUM_REVISION=0
 ENV PYPPETEER_HOME=/tmp/pyppeteer
 
