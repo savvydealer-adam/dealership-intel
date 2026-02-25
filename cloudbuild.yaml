@@ -32,7 +32,7 @@ steps:
       - '--timeout=120'
       - '--min-instances=0'
       - '--max-instances=3'
-      - '--set-secrets=APOLLO_API_KEY=APOLLO_API_KEY:latest,DATABASE_URL=DATABASE_URL:latest,GOOGLE_SHEETS_JSON=GOOGLE_SHEETS_JSON:latest'
+      - '--set-env-vars=PYPPETEER_CHROMIUM_REVISION=0,CHROMIUM_PATH=/usr/bin/chromium'
       - '--allow-unauthenticated'
 
 images:
