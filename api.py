@@ -6,6 +6,7 @@ Run alongside Streamlit or standalone: uvicorn api:app --port 8080
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -15,6 +16,7 @@ from crawlers.browser import get_browser_manager, get_nodriver_manager
 from crawlers.staff_crawler import StaffCrawler
 from crawlers.contact_extractor import extract_contacts_from_html
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Dealership Intel API", version="1.0.0")
@@ -55,12 +57,20 @@ async def scrape_staff(req: ScrapeRequest):
 
     # Try nodriver first (better at Cloudflare bypass)
     try:
+        logger.info(f"Attempting nodriver for {req.url}")
+        logger.info(f"CHROMIUM_PATH={os.environ.get('CHROMIUM_PATH', 'not set')}")
         nodriver_mgr = get_nodriver_manager()
         html = await nodriver_mgr.get_page_content(req.url)
         if html and "Just a moment" not in html:
+            logger.info(f"nodriver got {len(html)} bytes of HTML")
             contacts = extract_contacts_from_html(html, req.url)
+            logger.info(f"Extracted {len(contacts)} contacts from nodriver HTML")
+        elif html:
+            logger.warning(f"nodriver got Cloudflare challenge page ({len(html)} bytes)")
+        else:
+            logger.warning("nodriver returned no HTML")
     except Exception as e:
-        logger.warning(f"nodriver failed for {req.url}: {e}")
+        logger.warning(f"nodriver failed for {req.url}: {e}", exc_info=True)
 
     # Fallback to pyppeteer staff crawler if nodriver didn't get results
     if not contacts:

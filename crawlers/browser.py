@@ -146,11 +146,13 @@ class NodriverManager:
 
         browser = None
         try:
-            browser_args = {"headless": self.headless, "sandbox": False}
             chromium_path = os.environ.get("CHROMIUM_PATH")
-            if chromium_path:
-                browser_args["browser_executable_path"] = chromium_path
-            browser = await uc.start(**browser_args)
+            browser = await uc.start(
+                headless=self.headless,
+                sandbox=False,
+                browser_executable_path=chromium_path or None,
+                browser_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
             page = await browser.get(url, new_tab=True)
 
             # Wait for page to stabilize (Cloudflare challenge resolution)
