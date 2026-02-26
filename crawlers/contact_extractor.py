@@ -141,7 +141,7 @@ def _parse_provider_card(
             name_el = element.select_one(selector)
             if name_el:
                 name = name_el.get_text(strip=True)
-                if name and 2 < len(name) < 80 and not _is_generic_text(name):
+                if name and 2 < len(name) < 80 and not _is_generic_text(name) and _looks_like_person_name(name):
                     contact["name"] = name
                     break
         except Exception:
@@ -158,6 +158,18 @@ def _parse_provider_card(
                     break
         except Exception:
             continue
+
+    # Fallback: extract title from bare text nodes in the card
+    # (e.g. Overfuel puts job title as a text node, not in a tag)
+    if "title" not in contact:
+        from bs4 import NavigableString
+
+        for child in element.children:
+            if isinstance(child, NavigableString):
+                text = child.strip()
+                if text and 3 < len(text) < 100 and _looks_like_title(text):
+                    contact["title"] = text
+                    break
 
     # Extract email using provider-specific selectors, then fallback
     for selector in platform_info.email_selectors:
@@ -269,7 +281,7 @@ def _parse_contact_card(element, base_domain: str) -> dict[str, Any]:
         name_el = element.select_one(tag)
         if name_el:
             name = name_el.get_text(strip=True)
-            if name and len(name) > 2 and len(name) < 80 and not _is_generic_text(name):
+            if name and len(name) > 2 and len(name) < 80 and not _is_generic_text(name) and _looks_like_person_name(name):
                 contact["name"] = name
                 break
 
@@ -392,6 +404,20 @@ def extract_phones(text: str) -> list[str]:
     return phones
 
 
+def _normalize_domain(url_or_domain: str) -> str:
+    """Extract clean domain from a URL or domain string."""
+    d = url_or_domain.lower().strip()
+    # Strip protocol
+    if "://" in d:
+        d = d.split("://", 1)[1]
+    # Strip path
+    d = d.split("/")[0]
+    # Strip www prefix
+    if d.startswith("www."):
+        d = d[4:]
+    return d
+
+
 def _is_valid_contact_email(email: str, base_domain: str = "") -> bool:
     """Check if an email looks like a real person's contact."""
     local_part = email.split("@")[0].lower()
@@ -406,9 +432,9 @@ def _is_valid_contact_email(email: str, base_domain: str = "") -> bool:
         return False
 
     # Prefer emails matching the dealership domain
-    if base_domain and domain != base_domain.lower():
-        # Still allow if it's a subdomain
-        if not domain.endswith(f".{base_domain.lower()}"):
+    if base_domain:
+        normalized = _normalize_domain(base_domain)
+        if domain != normalized and not domain.endswith(f".{normalized}"):
             return False
 
     return True
@@ -425,8 +451,43 @@ def _is_generic_text(text: str) -> bool:
         "meet our team",
         "click here",
         "more info",
+        # Dealership department/section headings
+        "managers",
+        "management",
+        "sales",
+        "sales and finance",
+        "sales & finance",
+        "finance",
+        "service",
+        "parts",
+        "office",
+        "administration",
+        "body shop",
+        "internet",
+        "internet sales",
+        "staff",
+        "our staff",
+        "meet our staff",
+        "leadership",
+        "team",
     }
     return text.lower().strip() in generic
+
+
+def _looks_like_person_name(text: str) -> bool:
+    """Heuristic: does this text look like a person's name?
+
+    Real names have at least 2 words (first + last). Single words like
+    'Managers' or 'Finance' are department headings, not people.
+    """
+    words = text.strip().split()
+    if len(words) < 2:
+        return False
+    # Reject if it looks like a title/role instead of a name
+    title_only_words = {"general", "manager", "sales", "service", "finance", "director", "president"}
+    if all(w.lower() in title_only_words for w in words):
+        return False
+    return True
 
 
 def _looks_like_title(text: str) -> bool:
